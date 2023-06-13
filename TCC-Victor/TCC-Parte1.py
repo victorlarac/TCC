@@ -2,13 +2,14 @@ import logging
 import re
 import requests
 import PyPDF2
-from io import BytesIO
-from bs4 import BeautifulSoup
+from io import BytesIOlo
+from urllib.parse import urlparse
+from googleapiclient.discovery import build
 import time
 
 
 class PDFValidator:
-    def __init__(self, domain, filetype, num_results=2000, lang="pt"):
+    def __init__(self, domain, filetype, num_results=200, lang="pt"):
         self.domain = domain
         self.filetype = filetype
         self.num_results = num_results
@@ -19,29 +20,33 @@ class PDFValidator:
         }
         self.violating_links = []
         self.counter = 0
+        self.service = build("customsearch", "v1", developerKey="AIzaSyCAhaqz9Zjf0RgYPRvzKZaew-LjbUtb1Oo")
 
     def search_and_validate(self):
-        start_index = 0
-        while start_index < self.num_results:
-            search_url = f"http://{self.domain}"
-            response = self.session.get(search_url, headers=self.headers)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, "html.parser")
-            search_results = soup.find_all("a")
-            for result in search_results:
-                link = result.get("href", "")
-                if link.endswith('.pdf'):
-                    self.counter += 1
-                    print(f"Arquivo PDF {self.counter} encontrado: {link}")
-                    if self.check_pdf_violations(link):
-                        print(f"Este arquivo PDF {self.counter} contém dados pessoais que violam a LGPD.")
-                        self.violating_links.append(link)
-                    else:
-                        print(f"Este arquivo PDF {self.counter} não contém violações da LGPD.")
-                    if self.counter >= self.num_results:
-                        break
+        query = f"{self.domain} {self.filetype}"
+        start_index = 1
+        while start_index <= self.num_results:
+            response = self.service.cse().list(
+                q=query,
+                cx="a72fced6edd0640ee",
+                num=1,
+                start=start_index,
+                lr=f"lang_{self.lang}"
+            ).execute()
+            items = response.get("items", [])
+            if not items:
+                break
+            result = items[0]
+            link = result.get("link", "")
             start_index += 1
-
+            if link and link.endswith('.pdf'):
+                self.counter += 1
+                print(f"Arquivo PDF {self.counter} encontrado: {link}")
+                if self.check_pdf_violations(link):
+                    print(f"Este arquivo PDF {self.counter} contém dados pessoais que violam a LGPD.")
+                    self.violating_links.append(link)
+                else:
+                    print(f"Este arquivo PDF {self.counter} não contém violações da LGPD.")
         if self.violating_links:
             print("Links que violam a LGPD:")
             for link in self.violating_links:
@@ -52,6 +57,10 @@ class PDFValidator:
     def check_pdf_violations(self, pdf_url):
         try:
             response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 0))
+                time.sleep(retry_after or 1)
+                response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True)
             response.raise_for_status()
             pdf_content = response.content
             pdf_file = PyPDF2.PdfFileReader(BytesIO(pdf_content))
@@ -64,9 +73,6 @@ class PDFValidator:
             return violation_found
         except requests.exceptions.RequestException as e:
             logging.exception(f'Erro ao fazer o download do arquivo PDF: {e}')
-            return False
-        except requests.exceptions.HTTPError as e:
-            logging.exception(f'Erro HTTP ao acessar a URL do arquivo PDF: {e}')
             return False
 
     def check_keywords(self, text):
@@ -81,6 +87,10 @@ class PDFValidator:
         return bool(re.search(cpf_pattern, text) or re.search(cnpj_pattern, text) or re.search(phone_pattern, text))
 
 
-# Exemplo de uso
-validator = PDFValidator(domain="cefetmg.br", filetype="pdf", num_results=2000)
+# Exemplo de uso:
+domain = "cefetmg.br"
+filetype = "pdf"
+num_results = 200
+
+validator = PDFValidator(domain, filetype, num_results)
 validator.search_and_validate()
