@@ -1,12 +1,11 @@
 import logging
 import re
 import requests
-import PyPDF2
-from io import BytesIOlo
+from PyPDF2 import PdfReader, errors
+from io import BytesIO
 from urllib.parse import urlparse
 from googleapiclient.discovery import build
 import time
-
 
 class PDFValidator:
     def __init__(self, domain, filetype, num_results=200, lang="pt"):
@@ -26,53 +25,84 @@ class PDFValidator:
         query = f"{self.domain} {self.filetype}"
         start_index = 1
         while start_index <= self.num_results:
-            response = self.service.cse().list(
-                q=query,
-                cx="a72fced6edd0640ee",
-                num=1,
-                start=start_index,
-                lr=f"lang_{self.lang}"
-            ).execute()
+            try:
+                response = self.service.cse().list(
+                    q=query,
+                    cx="a72fced6edd0640ee",
+                    num=1,
+                    start=start_index,
+                    lr=f"lang_{self.lang}"
+                ).execute()
+            except Exception as e:
+                logging.error(f"Erro na busca: {e}")
+                break
+
             items = response.get("items", [])
             if not items:
                 break
+
             result = items[0]
             link = result.get("link", "")
             start_index += 1
+
             if link and link.endswith('.pdf'):
                 self.counter += 1
                 print(f"Arquivo PDF {self.counter} encontrado: {link}")
                 if self.check_pdf_violations(link):
-                    print(f"Este arquivo PDF {self.counter} contém dados pessoais que violam a LGPD.")
+                    print(f"⚠️ Este arquivo PDF {self.counter} contém dados pessoais que violam a LGPD.")
                     self.violating_links.append(link)
                 else:
-                    print(f"Este arquivo PDF {self.counter} não contém violações da LGPD.")
+                    print(f"✅ Este arquivo PDF {self.counter} não contém violações da LGPD.")
+
         if self.violating_links:
-            print("Links que violam a LGPD:")
+            print("\n⚠️ Links que violam a LGPD:")
             for link in self.violating_links:
                 print(link)
         else:
-            print("Nenhum link que viola a LGPD foi encontrado.")
+            print("\n✅ Nenhum link que viola a LGPD foi encontrado.")
 
     def check_pdf_violations(self, pdf_url):
         try:
-            response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True)
+            response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True, verify=False)
             if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', 0))
-                time.sleep(retry_after or 1)
-                response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True)
+                retry_after = int(response.headers.get('Retry-After', 1))
+                time.sleep(retry_after)
+                response = self.session.get(pdf_url, headers=self.headers, allow_redirects=True, verify=False)
+
             response.raise_for_status()
+
+            content_type = response.headers.get("Content-Type", "")
+            if not content_type.startswith("application/pdf"):
+                logging.warning(f"Conteúdo inválido (não é PDF): {pdf_url}")
+                return False
+
             pdf_content = response.content
-            pdf_file = PyPDF2.PdfFileReader(BytesIO(pdf_content))
-            violation_found = False
-            for page in range(pdf_file.numPages):
-                page_text = pdf_file.getPage(page).extractText()
-                if self.check_keywords(page_text) or self.check_patterns(page_text):
-                    violation_found = True
-                    break
-            return violation_found
+
+            # Salvar temporariamente para debug (opcional)
+            with open("debug_downloaded_file.pdf", "wb") as f:
+                f.write(pdf_content)
+
+            pdf_file = PdfReader(BytesIO(pdf_content))
+
+            for page in pdf_file.pages:
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception as e:
+                    logging.warning(f"Erro ao extrair texto da página: {e}")
+                    page_text = ""
+
+                if page_text and (self.check_keywords(page_text) or self.check_patterns(page_text)):
+                    return True
+            return False
+
+        except errors.PdfReadError as e:
+            logging.error(f"Erro ao processar o PDF (formato inválido): {e}")
+            return False
         except requests.exceptions.RequestException as e:
-            logging.exception(f'Erro ao fazer o download do arquivo PDF: {e}')
+            logging.exception(f"Erro ao fazer o download do arquivo PDF: {e}")
+            return False
+        except Exception as e:
+            logging.exception(f"Erro geral ao processar o PDF: {e}")
             return False
 
     def check_keywords(self, text):
@@ -88,9 +118,10 @@ class PDFValidator:
 
 
 # Exemplo de uso:
-domain = "cefetmg.br"
-filetype = "pdf"
-num_results = 200
+if __name__ == "__main__":
+    domain = "cefetmg.br"
+    filetype = "pdf"
+    num_results = 200
 
-validator = PDFValidator(domain, filetype, num_results)
-validator.search_and_validate()
+    validator = PDFValidator(domain, filetype, num_results)
+    validator.search_and_validate()
